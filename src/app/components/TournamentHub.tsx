@@ -2602,7 +2602,10 @@ export const TournamentHub: React.FC<TournamentHubProps> = ({
         <PlayoffsStageView
           matches={tournament.mode === 'round_robin' ? (tournament.roundRobinMatches || []) : tournament.playoffMatches}
           teams={teams}
-          mode={tournament.mode}
+          mode={(
+            tournament.mode === 'double_elimination'
+            || (tournament.currentStage === 'playoffs' && tournament.stageFormats?.playoffType === 'double_elimination')
+          ) ? 'double_elimination' : tournament.mode === 'round_robin' ? 'round_robin' : 'single_elimination'}
           isFromSwiss={tournament.mode === 'swiss_playoffs' || tournament.mode === 'major'}
           linkPlayoffsToSwiss={tournament.linkPlayoffsToSwiss !== false}
           onToggleLinkSwiss={tournament.mode === 'major' ? undefined : handleToggleLinkSwiss}
@@ -2610,7 +2613,7 @@ export const TournamentHub: React.FC<TournamentHubProps> = ({
           includeThirdPlace={tournament.includeThirdPlace || isEightTeamGslTournament(tournament)}
           thirdPlaceRequired={isEightTeamGslTournament(tournament)}
           onToggleThirdPlace={tournament.mode === 'major' ? () => {} : handleToggleThirdPlace}
-          hideThirdPlaceToggle={tournament.mode === 'major' || tournament.mode === 'double_elimination' || tournament.mode === 'round_robin'}
+          hideThirdPlaceToggle={tournament.mode === 'major' || tournament.mode === 'double_elimination' || tournament.stageFormats?.playoffType === 'double_elimination' || tournament.mode === 'round_robin'}
           onOpenMatch={(m) => setActiveMatchToSimulate(m)}
           onQuickSimulateMatch={handleQuickSimulateMatch}
           onSelectManualSlot={(matchId, slot) => setManualSlotPicker({ matchId, slot })}

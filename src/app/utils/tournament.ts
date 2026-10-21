@@ -2199,6 +2199,165 @@ function createDoubleEliminationBracket(tourId: string, seededTeams: Team[], sta
     };
 
     const T = (key: string) => `${tourId}_${key}`;
+
+    // Group stages can qualify 4, 6, or 12 teams for a Double Elimination
+    // playoff. Build a bye-aware upper bracket and wire every upper-bracket
+    // loser into a lower-bracket path without fake/unfinished bye matches.
+    // The established 8- and 16-team layouts below remain unchanged.
+    if ([4, 6, 12].includes(seededTeams.length)) {
+      type FlexibleNode = { teamId?: string; match?: TournamentMatch; result?: 'winner' | 'loser' } | null;
+      const bracketSize = 2 ** Math.ceil(Math.log2(seededTeams.length));
+      let seedOrder = [1, 2];
+      while (seedOrder.length < bracketSize) {
+        const nextSize = seedOrder.length * 2;
+        seedOrder = seedOrder.flatMap((seed) => [seed, nextSize + 1 - seed]);
+      }
+      const teamBySeed = new Map(seededTeams.map((team, index) => [index + 1, team.id]));
+      let upperNodes: FlexibleNode[] = seedOrder.map((seed) => {
+        const teamId = teamBySeed.get(seed);
+        return teamId ? { teamId } : null;
+      });
+      const upperRounds: TournamentMatch[][] = [];
+      const roundCount = Math.log2(bracketSize);
+
+      for (let roundIndex = 1; roundIndex <= roundCount; roundIndex++) {
+        const matchesInRound: TournamentMatch[] = [];
+        const nextNodes: FlexibleNode[] = [];
+        const slotsAtRoundStart = upperNodes.length;
+        let activeIndex = 0;
+        for (let index = 0; index < upperNodes.length; index += 2) {
+          const nodeA = upperNodes[index] || null;
+          const nodeB = upperNodes[index + 1] || null;
+          if (!nodeA && !nodeB) { nextNodes.push(null); continue; }
+          if (nodeA && !nodeB) { nextNodes.push(nodeA); continue; }
+          if (!nodeA && nodeB) { nextNodes.push(nodeB); continue; }
+
+          activeIndex += 1;
+          const isFinalRound = roundIndex === roundCount;
+          const poolKey = isFinalRound
+            ? 'ub_final'
+            : slotsAtRoundStart >= 16
+              ? `ub_r1_${activeIndex}`
+              : slotsAtRoundStart === 8
+                ? `qf${activeIndex}`
+                : `sf${activeIndex}`;
+          const roundLabel = isFinalRound
+            ? 'Upper Bracket · Final'
+            : slotsAtRoundStart >= 16
+              ? `Upper Bracket · Opening round ${activeIndex}`
+              : slotsAtRoundStart === 8
+                ? `Upper Bracket · Quarter-final ${activeIndex}`
+                : `Upper Bracket · Semi-final ${activeIndex}`;
+          const matchFormat = isFinalRound || slotsAtRoundStart <= 4 ? sfFmt : qfFmt;
+          addMatch(
+            poolKey,
+            roundLabel,
+            roundIndex,
+            matchFormat,
+            nodeA?.match?.id,
+            nodeA?.result || 'winner',
+            nodeB?.match?.id,
+            nodeB?.result || 'winner',
+            nodeA?.teamId,
+            nodeB?.teamId
+          );
+          const created = bracket[bracket.length - 1];
+          matchesInRound.push(created);
+          nextNodes.push({ match: created, result: 'winner' });
+        }
+        upperRounds.push(matchesInRound);
+        upperNodes = nextNodes;
+      }
+
+      const loserNode = (match: TournamentMatch): FlexibleNode => ({ match, result: 'loser' });
+      const winnerNode = (match: TournamentMatch): FlexibleNode => ({ match, result: 'winner' });
+      let lowerRoundNumber = 1;
+
+      const buildLowerRound = (nodes: FlexibleNode[], prefix: string, label: string, format: MatchFormat): FlexibleNode[] => {
+        const arranged = [...nodes];
+        // A single entrant receives a structural bye; no fake match is created.
+        if (arranged.length % 2 === 1) arranged.unshift(null);
+        const nextNodes: FlexibleNode[] = [];
+        let matchIndex = 0;
+        for (let index = 0; index < arranged.length; index += 2) {
+          const nodeA = arranged[index] || null;
+          const nodeB = arranged[index + 1] || null;
+          if (!nodeA && !nodeB) { nextNodes.push(null); continue; }
+          if (nodeA && !nodeB) { nextNodes.push(nodeA); continue; }
+          if (!nodeA && nodeB) { nextNodes.push(nodeB); continue; }
+          matchIndex += 1;
+          const key = `${prefix}_${matchIndex}`;
+          addMatch(
+            key,
+            `${label} · Match ${matchIndex}`,
+            lowerRoundNumber,
+            format,
+            nodeA?.match?.id,
+            nodeA?.result || 'winner',
+            nodeB?.match?.id,
+            nodeB?.result || 'winner',
+            nodeA?.teamId,
+            nodeB?.teamId
+          );
+          nextNodes.push({ match: bracket[bracket.length - 1], result: 'winner' });
+        }
+        lowerRoundNumber += 1;
+        return nextNodes.filter(Boolean);
+      };
+
+      // First lower round contains opening-round losers.
+      let lowerSurvivors: FlexibleNode[] = buildLowerRound(
+        (upperRounds[0] || []).map(loserNode),
+        'lb_r1',
+        'Lower Bracket · Round 1',
+        qfFmt
+      );
+
+      // Losers from each later upper round (except the upper final) join the
+      // surviving lower teams. Odd cohorts get structural byes, not fabricated games.
+      for (let upperIndex = 1; upperIndex < upperRounds.length - 1; upperIndex++) {
+        const incoming = (upperRounds[upperIndex] || []).map(loserNode);
+        const entrants = [...lowerSurvivors, ...incoming];
+        const prefix = `lb_r${lowerRoundNumber}`;
+        lowerSurvivors = buildLowerRound(
+          entrants,
+          prefix,
+          `Lower Bracket · Round ${lowerRoundNumber}`,
+          entrants.length > 4 ? qfFmt : sfFmt
+        );
+      }
+
+      // Collapse the remaining lower teams to one finalist before the upper
+      // final loser enters the lower final.
+      while (lowerSurvivors.length > 1) {
+        const prefix = `lb_r${lowerRoundNumber}`;
+        lowerSurvivors = buildLowerRound(
+          lowerSurvivors,
+          prefix,
+          `Lower Bracket · Round ${lowerRoundNumber}`,
+          lowerSurvivors.length > 4 ? qfFmt : sfFmt
+        );
+      }
+
+      const upperFinal = upperRounds[upperRounds.length - 1]?.[0];
+      if (upperFinal && lowerSurvivors[0]) {
+        addMatch(
+          'lb_final',
+          'Lower Bracket · Final',
+          lowerRoundNumber,
+          sfFmt,
+          lowerSurvivors[0]?.match?.id,
+          lowerSurvivors[0]?.result || 'winner',
+          upperFinal.id,
+          'loser'
+        );
+        const lowerFinal = bracket[bracket.length - 1];
+        addMatch('final', 'Grand Final · Upper Winner vs Lower Winner', lowerRoundNumber + 1, finalFmt,
+          upperFinal.id, 'winner', lowerFinal.id, 'winner');
+      }
+      return bracket;
+    }
+
     if (seededTeams.length > 8) {
       // 16-team double elimination (opening round, UQF, USF, UF; 6 lower rounds).
       const r1Pairs = [[0, 15], [7, 8], [4, 11], [3, 12], [2, 13], [5, 10], [6, 9], [1, 14]];

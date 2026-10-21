@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { createCustomTournament, createEmptyPlayoffBracket, updateGroupMatchResult, updatePlayoffMatchResult, computeFinalTournamentStandings, normalizeTrophyMatchStageName, isThirdPlaceMatch } from './tournament';
+import { applyOpeningPairOrders, getOpeningScopes, getOpeningSlots } from './openingPairs';
 
 describe('playoff final detection', () => {
   it('finishing a quarterfinal does not end the tournament', () => {
@@ -407,3 +408,166 @@ describe('8-team GSL playoff bronze-match completion and trophy labels', () => {
   });
 });
 
+
+describe('four-group GSL classic with selectable playoff brackets', () => {
+  const makeTeams = (count = 16) => Array.from({ length: count }, (_, i) => ({
+    id: `four-group-team-${i + 1}`,
+    name: `Four Group Team ${i + 1}`,
+    shortName: `FG${i + 1}`,
+    points: 1800 - i,
+    defaultPoints: 1800 - i,
+    logoUrl: '',
+    primaryColor: '#000000',
+    secondaryColor: '#ffffff',
+    country: 'Test',
+    region: 'Test',
+    rosterSnippet: []
+  } as any));
+
+  const finishAllGroups = (initial: ReturnType<typeof createCustomTournament>) => {
+    let tournament = initial;
+    let guard = 0;
+    while (tournament.currentStage !== 'playoffs' && guard++ < 100) {
+      const ready = (tournament.groupMatches || []).find((match) => match.status === 'ready' && match.teamAId && match.teamBId);
+      if (!ready) throw new Error('Expected a ready group match before group stage completion');
+      tournament = updateGroupMatchResult(tournament, ready.id, 2, 0, 'BO3').updatedTournament;
+    }
+    return tournament;
+  };
+
+  it('creates four classic GSL groups of four and seeds eight teams into single-elimination quarterfinals', () => {
+    const initial = createCustomTournament({
+      name: 'Four-group GSL · Single Elimination',
+      mode: 'gsl_groups',
+      teams: makeTeams(),
+      stageFormats: { groupCount: 4, groupStyle: 'gsl_classic_4', playoffType: 'single_elimination' }
+    });
+
+    expect(initial.groups).toHaveLength(4);
+    expect(initial.groups!.map((group) => group.letter)).toEqual(['A', 'B', 'C', 'D']);
+    expect(initial.groups!.every((group) => group.teamIds.length === 4 && group.matches.length === 5)).toBe(true);
+
+    const tournament = finishAllGroups(initial);
+    expect(tournament.currentStage).toBe('playoffs');
+    expect(tournament.groups!.every((group) => group.qualifiedTeamIds?.length === 2)).toBe(true);
+    const quarterfinals = tournament.playoffMatches.filter((match) => /^qf[1-4]$/.test(match.poolKey));
+    expect(quarterfinals).toHaveLength(4);
+    expect(quarterfinals.every((match) => match.teamAId && match.teamBId && match.status === 'ready')).toBe(true);
+  });
+
+  it('routes the same eight GSL qualifiers into the selectable double-elimination bracket', () => {
+    const initial = createCustomTournament({
+      name: 'Four-group GSL · Double Elimination',
+      mode: 'gsl_groups',
+      teams: makeTeams(),
+      stageFormats: { groupCount: 4, groupStyle: 'gsl_classic_4', playoffType: 'double_elimination' }
+    });
+    const tournament = finishAllGroups(initial);
+
+    expect(tournament.currentStage).toBe('playoffs');
+    expect(tournament.includeThirdPlace).toBe(false);
+    expect(tournament.playoffMatches.filter((match) => /^qf[1-4]$/.test(match.poolKey))).toHaveLength(4);
+    expect(tournament.playoffMatches.filter((match) => /^qf[1-4]$/.test(match.poolKey)).every((match) => match.teamAId && match.teamBId && match.status === 'ready')).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'ub_final')).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'lb_final')).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'final')).toBe(true);
+  });
+
+  it('routes six qualifiers from two eight-team GSL groups into double elimination', () => {
+    const initial = createCustomTournament({
+      name: 'Eight-team GSL groups · Double Elimination playoffs',
+      mode: 'gsl_groups',
+      teams: makeTeams(),
+      stageFormats: { groupCount: 2, groupStyle: 'gsl_double_elim_8', playoffType: 'double_elimination' }
+    });
+    const tournament = finishAllGroups(initial);
+
+    expect(tournament.currentStage).toBe('playoffs');
+    expect(tournament.groups!.every((group) => group.qualifiedTeamIds?.length === 3)).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'ub_final')).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'lb_final')).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'final')).toBe(true);
+  });
+
+  it('creates a bye-aware double-elimination bracket for a twelve-team group playoff', () => {
+    const initial = createCustomTournament({
+      name: 'Four-group Top 3 · Double Elimination',
+      mode: 'gsl_groups',
+      teams: makeTeams(),
+      stageFormats: { groupCount: 4, groupStyle: 'gsl_top3', playoffType: 'double_elimination' }
+    });
+    const tournament = finishAllGroups(initial);
+
+    expect(tournament.currentStage).toBe('playoffs');
+    expect(tournament.groups!.every((group) => group.qualifiedTeamIds?.length === 3)).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'ub_final')).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'lb_final')).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'final')).toBe(true);
+    expect(new Set(tournament.playoffMatches.map((match) => match.id)).size).toBe(tournament.playoffMatches.length);
+  });
+
+  it.each([4, 6, 12])('creates a direct double-elimination bracket for %i entrants', (count) => {
+    const tournament = createCustomTournament({
+      name: `Flexible DE ${count}`,
+      mode: 'double_elimination',
+      teams: makeTeams(count),
+      includeThirdPlace: false
+    });
+
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'ub_final')).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'lb_final')).toBe(true);
+    expect(tournament.playoffMatches.some((match) => match.poolKey === 'final')).toBe(true);
+    expect(new Set(tournament.playoffMatches.map((match) => match.id)).size).toBe(tournament.playoffMatches.length);
+  });
+});
+
+
+describe('manual opening-pair assignment', () => {
+  const makeTeams = (count: number) => Array.from({ length: count }, (_, i) => ({
+    id: `pair-team-${i + 1}`,
+    name: `Pair Team ${i + 1}`,
+    shortName: `P${i + 1}`,
+    points: 1200 - i,
+    defaultPoints: 1200 - i,
+    logoUrl: '',
+    primaryColor: '#000000',
+    secondaryColor: '#ffffff',
+    country: 'Test',
+    region: 'Test',
+    rosterSnippet: []
+  } as any));
+
+  it.each(['single_elimination', 'double_elimination'] as const)('lets the organizer change first-round pairings in %s', (mode) => {
+    const tournament = createCustomTournament({ name: `Manual pairs ${mode}`, mode, teams: makeTeams(8), includeThirdPlace: false });
+    const scope = getOpeningScopes(tournament)[0];
+    const slots = getOpeningSlots(scope.matches, scope.roundRobin);
+    expect(slots).toHaveLength(8);
+    const originalOrder = slots.map((slot) => slot.teamId);
+    const order = [...originalOrder];
+    [order[1], order[2]] = [order[2], order[1]];
+
+    const changed = applyOpeningPairOrders(tournament, { [scope.key]: order });
+    expect(changed.playoffMatches.find((match) => match.id === slots[0].match.id)?.teamBId).toBe(originalOrder[2]);
+    expect(changed.playoffMatches.find((match) => match.id === slots[2].match.id)?.teamAId).toBe(originalOrder[1]);
+  });
+
+  it('lets the organizer change opening matchups inside each GSL group', () => {
+    const tournament = createCustomTournament({
+      name: 'Manual GSL pairs',
+      mode: 'gsl_groups',
+      teams: makeTeams(16),
+      stageFormats: { groupCount: 4, groupStyle: 'gsl_classic_4' }
+    });
+    const groupScope = getOpeningScopes(tournament).find((scope) => scope.key === 'group_A')!;
+    const slots = getOpeningSlots(groupScope.matches, groupScope.roundRobin);
+    expect(slots).toHaveLength(4);
+    const originalOrder = slots.map((slot) => slot.teamId);
+    const order = [...originalOrder];
+    [order[1], order[2]] = [order[2], order[1]];
+
+    const changed = applyOpeningPairOrders(tournament, { [groupScope.key]: order });
+    const groupA = changed.groups!.find((group) => group.letter === 'A')!;
+    expect(groupA.matches.find((match) => match.poolKey === 'gsl_A_opening1')?.teamBId).toBe(originalOrder[2]);
+    expect(groupA.matches.find((match) => match.poolKey === 'gsl_A_opening2')?.teamAId).toBe(originalOrder[1]);
+  });
+});
