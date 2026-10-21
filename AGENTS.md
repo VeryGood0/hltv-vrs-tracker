@@ -12,3 +12,5 @@
 - The imported CS2 simulator lives in src/app and is rendered client-only from src/routes/index.tsx — it relies on localStorage everywhere.
 - Simulation settings (rating weight) live in src/app/utils/settings.ts and are read by mapSimulation — single source for rating-vs-map blending.
 - Grand final detection must use isGrandFinalMatch() in tournament.ts — name-based "финал" matching caught quarterfinals.
+- Qualifying stages preserve their tournament mode and store the playoff type in stageFormats; source-linked elimination brackets share creation and progression with standalone cups.
+- Opening-pair edits permute eligible entrants, and round-robin edits permute the full unplayed schedule to preserve every-pair-once rules.

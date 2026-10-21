@@ -265,6 +265,7 @@ export interface RoundRobinTableRow {
 }
 
 export interface StageFormatSettings {
+  playoffType?: 'single_elimination' | 'double_elimination';
   groupStageFormat?: MatchFormat;
   groupFormat?: MatchFormat;
   groupCount?: number; // number of groups
