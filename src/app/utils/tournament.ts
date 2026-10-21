@@ -25,6 +25,7 @@ let tournamentIdSequence = 0;
  * before it is played.
  */
 export function isEightTeamGslTournament(tournament?: Partial<TournamentState> | null): boolean {
+  if (tournament?.stageFormats?.playoffType === 'double_elimination') return false;
   if (!tournament || (tournament.mode !== 'gsl_groups' && tournament.mode !== 'groups_playoffs')) return false;
 
   const style = tournament.groupStyle
@@ -798,12 +799,22 @@ function advanceMajorSwissStage(
   }
 
   // Stage 3 sends its eight qualified teams to the usual 8-team Major playoff bracket.
-  const seededPlayoffMatches = seedMajorPlayoffs(
+  let seededPlayoffMatches = seedMajorPlayoffs(
     updatedRecords,
     allTeams,
     currentState.stageFormats
   );
 
+  if (currentState.stageFormats?.playoffType === 'double_elimination') {
+    const ids = seededPlayoffMatches.filter((match) => match.poolKey.startsWith('qf')).flatMap((match) => [match.teamAId, match.teamBId]);
+    const entrantTeams = ids.map((id) => allTeams.find((team) => team.id === id)).filter(Boolean) as Team[];
+    const bracket = createDoubleEliminationBracket(currentState.id, entrantTeams, currentState.stageFormats);
+    const pairs = seededPlayoffMatches.filter((match) => match.poolKey.startsWith('qf'));
+    seededPlayoffMatches = bracket.map((match) => {
+      const pair = pairs.find((pair) => pair.poolKey === match.poolKey);
+      return pair ? { ...match, teamAId: pair.teamAId, teamBId: pair.teamBId, status: 'ready' as const } : match;
+    });
+  }
   return {
     ...currentState,
     currentStage: 'playoffs',
@@ -1134,10 +1145,11 @@ export function seedPlayoffsFromSwiss(
   const seed7 = pool3_2[1]?.teamId;
   const seed8 = pool3_2[2]?.teamId;
 
-  const matches = createEmptyPlayoffBracket(includeThirdPlace);
+  const isDE = playoffMatches.some((match) => match.poolKey === 'ub_final');
+  const matches = isDE ? playoffMatches.map((match) => ({ ...match })) : createEmptyPlayoffBracket(includeThirdPlace);
 
   // QF1: Seed 1 vs Seed 8
-  const qf1 = matches.find((m) => m.id === 'playoff_qf1');
+  const qf1 = matches.find((m) => m.poolKey === 'qf1');
   if (qf1) {
     qf1.teamAId = seed1;
     qf1.teamBId = seed8;
@@ -1145,7 +1157,7 @@ export function seedPlayoffsFromSwiss(
   }
 
   // QF2: Seed 4 vs Seed 5
-  const qf2 = matches.find((m) => m.id === 'playoff_qf2');
+  const qf2 = matches.find((m) => m.poolKey === 'qf2');
   if (qf2) {
     qf2.teamAId = seed4;
     qf2.teamBId = seed5;
@@ -1153,7 +1165,7 @@ export function seedPlayoffsFromSwiss(
   }
 
   // QF3: Seed 2 vs Seed 7
-  const qf3 = matches.find((m) => m.id === 'playoff_qf3');
+  const qf3 = matches.find((m) => m.poolKey === 'qf3');
   if (qf3) {
     qf3.teamAId = seed2;
     qf3.teamBId = seed7;
@@ -1161,7 +1173,7 @@ export function seedPlayoffsFromSwiss(
   }
 
   // QF4: Seed 3 vs Seed 6
-  const qf4 = matches.find((m) => m.id === 'playoff_qf4');
+  const qf4 = matches.find((m) => m.poolKey === 'qf4');
   if (qf4) {
     qf4.teamAId = seed3;
     qf4.teamBId = seed6;
@@ -1424,7 +1436,7 @@ export function computeFinalTournamentStandings(
     return standings;
   }
 
-  if (mode === 'double_elimination') {
+  if (playoffMatches.some((match) => match.poolKey === 'ub_final')) {
     if (finalMatch?.winnerId) standings.push({
       place: 1,
       placeLabel: '1-е место · Чемпион Double Elimination',
@@ -1467,6 +1479,8 @@ export function computeFinalTournamentStandings(
         });
       });
     }
+    const remaining = (tournament.participatingTeamIds || []).filter((id) => !standings.some((row) => row.teamId === id));
+    remaining.forEach((teamId) => standings.push({ place: standings.length + 1, placeLabel: 'Групповой / швейцарский этап', teamId }));
     return standings;
   }
 
@@ -2126,6 +2140,112 @@ function createSingleEliminationBracket(
   return matches;
 }
 
+/** Collapse absent seeds before play; byes are never recorded as played losses. */
+function pruneBracketByes(bracket: TournamentMatch[]): TournamentMatch[] {
+  type Node = { teamId?: string; source?: string; result?: 'winner' | 'loser' };
+  const results = new Map<string, { winner?: Node; loser?: Node }>();
+  const output: TournamentMatch[] = [];
+  for (const match of bracket) {
+    const node = (side: 'A' | 'B'): Node | undefined => {
+      const source = side === 'A' ? match.sourceA : match.sourceB;
+      const result = (side === 'A' ? match.sourceAResult : match.sourceBResult) || 'winner';
+      const teamId = side === 'A' ? match.teamAId : match.teamBId;
+      return source ? results.get(source)?.[result] : teamId ? { teamId } : undefined;
+    };
+    const a = node('A'), b = node('B');
+    if (!a || !b) { results.set(match.id, { winner: a || b }); continue; }
+    output.push({ ...match, teamAId: a.teamId, teamBId: b.teamId,
+      sourceA: a.source, sourceAResult: a.result, sourceB: b.source, sourceBResult: b.result,
+      status: a.teamId && b.teamId ? 'ready' : 'scheduled' });
+    results.set(match.id, { winner: { source: match.id, result: 'winner' }, loser: { source: match.id, result: 'loser' } });
+  }
+  return output;
+}
+
+function createDoubleEliminationBracket(tourId: string, seededTeams: Team[], stageFormats: StageFormatSettings): TournamentMatch[] {
+    const qfFmt = stageFormats.quarterfinalFormat || 'BO3';
+    const sfFmt = stageFormats.semifinalFormat || 'BO3';
+    const finalFmt = stageFormats.finalFormat || 'BO5';
+    const bracket: TournamentMatch[] = [];
+    const addMatch = (
+      poolKey: string,
+      name: string,
+      roundNumber: number,
+      format: MatchFormat,
+      sourceA?: string,
+      sourceAResult: 'winner' | 'loser' = 'winner',
+      sourceB?: string,
+      sourceBResult: 'winner' | 'loser' = 'winner',
+      teamAId?: string,
+      teamBId?: string
+    ) => {
+      bracket.push({
+        id: `${tourId}_${poolKey}`,
+        stage: poolKey.startsWith('lb') ? 'lower_bracket' : poolKey === 'final' ? 'grand_final' : 'upper_bracket',
+        poolKey,
+        roundNumber,
+        name,
+        sourceA,
+        sourceAResult,
+        sourceB,
+        sourceBResult,
+        teamAId,
+        teamBId,
+        scoreA: 0,
+        scoreB: 0,
+        format,
+        status: teamAId && teamBId ? 'ready' : 'scheduled'
+      });
+    };
+
+    const T = (key: string) => `${tourId}_${key}`;
+    if (seededTeams.length > 8) {
+      // 16-team double elimination (opening round, UQF, USF, UF; 6 lower rounds).
+      const r1Pairs = [[0, 15], [7, 8], [4, 11], [3, 12], [2, 13], [5, 10], [6, 9], [1, 14]];
+      r1Pairs.forEach(([a, b], i) => addMatch(`ub_r1_${i + 1}`, `Upper Bracket · Opening round ${i + 1}`, 1, qfFmt,
+        undefined, 'winner', undefined, 'winner', seededTeams[a]?.id, seededTeams[b]?.id));
+      for (let i = 1; i <= 4; i++) addMatch(`qf${i}`, `Upper Bracket · Quarter-final ${i}`, 2, qfFmt, T(`ub_r1_${i * 2 - 1}`), 'winner', T(`ub_r1_${i * 2}`), 'winner');
+      addMatch('sf1', 'Upper Bracket · Semi-final 1', 3, sfFmt, T('qf1'), 'winner', T('qf2'), 'winner');
+      addMatch('sf2', 'Upper Bracket · Semi-final 2', 3, sfFmt, T('qf3'), 'winner', T('qf4'), 'winner');
+      addMatch('ub_final', 'Upper Bracket · Final', 4, sfFmt, T('sf1'), 'winner', T('sf2'), 'winner');
+      for (let i = 1; i <= 4; i++) addMatch(`lb_r1_${i}`, `Lower Bracket · Round 1 · Match ${i}`, 1, qfFmt, T(`ub_r1_${i * 2 - 1}`), 'loser', T(`ub_r1_${i * 2}`), 'loser');
+      for (let i = 1; i <= 4; i++) addMatch(`lb_r2_${i}`, `Lower Bracket · Round 2 · Match ${i}`, 2, qfFmt, T(`lb_r1_${i}`), 'winner', T(`qf${5 - i}`), 'loser');
+      addMatch('lb_r3_1', 'Lower Bracket · Round 3 · Match 1', 3, qfFmt, T('lb_r2_1'), 'winner', T('lb_r2_2'), 'winner');
+      addMatch('lb_r3_2', 'Lower Bracket · Round 3 · Match 2', 3, qfFmt, T('lb_r2_3'), 'winner', T('lb_r2_4'), 'winner');
+      addMatch('lb_r4_1', 'Lower Bracket · Semi-final 1', 4, sfFmt, T('lb_r3_1'), 'winner', T('sf2'), 'loser');
+      addMatch('lb_r4_2', 'Lower Bracket · Semi-final 2', 4, sfFmt, T('lb_r3_2'), 'winner', T('sf1'), 'loser');
+      addMatch('lb_sf', 'Lower Bracket · Final', 5, sfFmt, T('lb_r4_1'), 'winner', T('lb_r4_2'), 'winner');
+      addMatch('lb_final', 'Consolidation Final', 6, sfFmt, T('lb_sf'), 'winner', T('ub_final'), 'loser');
+      addMatch('final', 'Grand Final · Upper Winner vs Lower Winner', 7, finalFmt, T('ub_final'), 'winner', T('lb_final'), 'winner');
+      return pruneBracketByes(bracket);
+    }
+
+    const qfPairs = [[0, 7], [3, 4], [1, 6], [2, 5]];
+    qfPairs.forEach(([indexA, indexB], index) => addMatch(
+      `qf${index + 1}`,
+      `Upper Bracket · Quarter-final ${index + 1}`,
+      1,
+      qfFmt,
+      undefined, 'winner', undefined, 'winner',
+      seededTeams[indexA]?.id,
+      seededTeams[indexB]?.id
+    ));
+
+    addMatch('sf1', 'Upper Bracket · Semi-final 1', 2, sfFmt, `${tourId}_qf1`, 'winner', `${tourId}_qf2`, 'winner');
+    addMatch('sf2', 'Upper Bracket · Semi-final 2', 2, sfFmt, `${tourId}_qf3`, 'winner', `${tourId}_qf4`, 'winner');
+    addMatch('ub_final', 'Upper Bracket · Final', 3, sfFmt, `${tourId}_sf1`, 'winner', `${tourId}_sf2`, 'winner');
+
+    addMatch('lb_r1_1', 'Lower Bracket · Round 1 · Match 1', 2, qfFmt, `${tourId}_qf1`, 'loser', `${tourId}_qf2`, 'loser');
+    addMatch('lb_r1_2', 'Lower Bracket · Round 1 · Match 2', 2, qfFmt, `${tourId}_qf3`, 'loser', `${tourId}_qf4`, 'loser');
+    addMatch('lb_r2_1', 'Lower Bracket · Round 2 · Match 1', 3, qfFmt, `${tourId}_lb_r1_1`, 'winner', `${tourId}_sf2`, 'loser');
+    addMatch('lb_r2_2', 'Lower Bracket · Round 2 · Match 2', 3, qfFmt, `${tourId}_lb_r1_2`, 'winner', `${tourId}_sf1`, 'loser');
+    addMatch('lb_sf', 'Lower Bracket · Semi-final', 4, sfFmt, `${tourId}_lb_r2_1`, 'winner', `${tourId}_lb_r2_2`, 'winner');
+    addMatch('lb_final', 'Lower Bracket · Final', 5, sfFmt, `${tourId}_lb_sf`, 'winner', `${tourId}_ub_final`, 'loser');
+    addMatch('final', 'Grand Final · Upper Winner vs Lower Winner', 6, finalFmt, `${tourId}_ub_final`, 'winner', `${tourId}_lb_final`, 'winner');
+
+    return pruneBracketByes(bracket);
+}
+
 /**
  * Creates a fully customized tournament state based on user parameters, format, and seeding.
  */
@@ -2152,7 +2272,7 @@ export function createCustomTournament(params: CreateTournamentParams): Tourname
     && teamCount >= 16
     && groupCountForFormat === 2
     && (requestedGroupStyle === 'gsl_double_elim_8' || requestedGroupStyle === 'gsl');
-  const effectiveIncludeThirdPlace = mode === 'major' ? false : includeThirdPlace || mandatoryGslEightTeamThirdPlace;
+  const effectiveIncludeThirdPlace = mode === 'major' || stageFormats.playoffType === 'double_elimination' ? false : includeThirdPlace || mandatoryGslEightTeamThirdPlace;
   const teamSeeds: Record<string, number> = {};
   seededTeams.forEach((t, idx) => {
     teamSeeds[t.id] = idx + 1;
@@ -2305,87 +2425,7 @@ export function createCustomTournament(params: CreateTournamentParams): Tourname
   // 2. Complete 8-team Double Elimination bracket. Every lower-bracket slot is
   // linked to the relevant upper-bracket loser/winner, so it fills itself in.
   if (mode === 'double_elimination') {
-    const qfFmt = stageFormats.quarterfinalFormat || 'BO3';
-    const sfFmt = stageFormats.semifinalFormat || 'BO3';
-    const finalFmt = stageFormats.finalFormat || 'BO5';
-    const bracket: TournamentMatch[] = [];
-    const addMatch = (
-      poolKey: string,
-      name: string,
-      roundNumber: number,
-      format: MatchFormat,
-      sourceA?: string,
-      sourceAResult: 'winner' | 'loser' = 'winner',
-      sourceB?: string,
-      sourceBResult: 'winner' | 'loser' = 'winner',
-      teamAId?: string,
-      teamBId?: string
-    ) => {
-      bracket.push({
-        id: `${tourId}_${poolKey}`,
-        stage: poolKey.startsWith('lb') ? 'lower_bracket' : poolKey === 'final' ? 'grand_final' : 'upper_bracket',
-        poolKey,
-        roundNumber,
-        name,
-        sourceA,
-        sourceAResult,
-        sourceB,
-        sourceBResult,
-        teamAId,
-        teamBId,
-        scoreA: 0,
-        scoreB: 0,
-        format,
-        status: teamAId && teamBId ? 'ready' : 'scheduled'
-      });
-    };
-
-    const T = (key: string) => `${tourId}_${key}`;
-    if (seededTeams.length >= 16) {
-      // 16-team double elimination (opening round, UQF, USF, UF; 6 lower rounds).
-      const r1Pairs = [[0, 15], [7, 8], [4, 11], [3, 12], [2, 13], [5, 10], [6, 9], [1, 14]];
-      r1Pairs.forEach(([a, b], i) => addMatch(`ub_r1_${i + 1}`, `Upper Bracket · Opening round ${i + 1}`, 1, qfFmt,
-        undefined, 'winner', undefined, 'winner', seededTeams[a!]?.id, seededTeams[b!]?.id));
-      for (let i = 1; i <= 4; i++) addMatch(`qf${i}`, `Upper Bracket · Quarter-final ${i}`, 2, qfFmt, T(`ub_r1_${i * 2 - 1}`), 'winner', T(`ub_r1_${i * 2}`), 'winner');
-      addMatch('sf1', 'Upper Bracket · Semi-final 1', 3, sfFmt, T('qf1'), 'winner', T('qf2'), 'winner');
-      addMatch('sf2', 'Upper Bracket · Semi-final 2', 3, sfFmt, T('qf3'), 'winner', T('qf4'), 'winner');
-      addMatch('ub_final', 'Upper Bracket · Final', 4, sfFmt, T('sf1'), 'winner', T('sf2'), 'winner');
-      for (let i = 1; i <= 4; i++) addMatch(`lb_r1_${i}`, `Lower Bracket · Round 1 · Match ${i}`, 1, qfFmt, T(`ub_r1_${i * 2 - 1}`), 'loser', T(`ub_r1_${i * 2}`), 'loser');
-      for (let i = 1; i <= 4; i++) addMatch(`lb_r2_${i}`, `Lower Bracket · Round 2 · Match ${i}`, 2, qfFmt, T(`lb_r1_${i}`), 'winner', T(`qf${5 - i}`), 'loser');
-      addMatch('lb_r3_1', 'Lower Bracket · Round 3 · Match 1', 3, qfFmt, T('lb_r2_1'), 'winner', T('lb_r2_2'), 'winner');
-      addMatch('lb_r3_2', 'Lower Bracket · Round 3 · Match 2', 3, qfFmt, T('lb_r2_3'), 'winner', T('lb_r2_4'), 'winner');
-      addMatch('lb_r4_1', 'Lower Bracket · Semi-final 1', 4, sfFmt, T('lb_r3_1'), 'winner', T('sf2'), 'loser');
-      addMatch('lb_r4_2', 'Lower Bracket · Semi-final 2', 4, sfFmt, T('lb_r3_2'), 'winner', T('sf1'), 'loser');
-      addMatch('lb_sf', 'Lower Bracket · Final', 5, sfFmt, T('lb_r4_1'), 'winner', T('lb_r4_2'), 'winner');
-      addMatch('lb_final', 'Consolidation Final', 6, sfFmt, T('lb_sf'), 'winner', T('ub_final'), 'loser');
-      addMatch('final', 'Grand Final · Upper Winner vs Lower Winner', 7, finalFmt, T('ub_final'), 'winner', T('lb_final'), 'winner');
-      return { ...baseState, teamCount: seededTeams.length, includeThirdPlace: false, playoffMatches: bracket };
-    }
-
-    const qfPairs = [[0, 7], [3, 4], [1, 6], [2, 5]];
-    qfPairs.forEach(([indexA, indexB], index) => addMatch(
-      `qf${index + 1}`,
-      `Upper Bracket · Quarter-final ${index + 1}`,
-      1,
-      qfFmt,
-      undefined, 'winner', undefined, 'winner',
-      seededTeams[indexA]?.id,
-      seededTeams[indexB]?.id
-    ));
-
-    addMatch('sf1', 'Upper Bracket · Semi-final 1', 2, sfFmt, `${tourId}_qf1`, 'winner', `${tourId}_qf2`, 'winner');
-    addMatch('sf2', 'Upper Bracket · Semi-final 2', 2, sfFmt, `${tourId}_qf3`, 'winner', `${tourId}_qf4`, 'winner');
-    addMatch('ub_final', 'Upper Bracket · Final', 3, sfFmt, `${tourId}_sf1`, 'winner', `${tourId}_sf2`, 'winner');
-
-    addMatch('lb_r1_1', 'Lower Bracket · Round 1 · Match 1', 2, qfFmt, `${tourId}_qf1`, 'loser', `${tourId}_qf2`, 'loser');
-    addMatch('lb_r1_2', 'Lower Bracket · Round 1 · Match 2', 2, qfFmt, `${tourId}_qf3`, 'loser', `${tourId}_qf4`, 'loser');
-    addMatch('lb_r2_1', 'Lower Bracket · Round 2 · Match 1', 3, qfFmt, `${tourId}_lb_r1_1`, 'winner', `${tourId}_sf2`, 'loser');
-    addMatch('lb_r2_2', 'Lower Bracket · Round 2 · Match 2', 3, qfFmt, `${tourId}_lb_r1_2`, 'winner', `${tourId}_sf1`, 'loser');
-    addMatch('lb_sf', 'Lower Bracket · Semi-final', 4, sfFmt, `${tourId}_lb_r2_1`, 'winner', `${tourId}_lb_r2_2`, 'winner');
-    addMatch('lb_final', 'Lower Bracket · Final', 5, sfFmt, `${tourId}_lb_sf`, 'winner', `${tourId}_ub_final`, 'loser');
-    addMatch('final', 'Grand Final · Upper Winner vs Lower Winner', 6, finalFmt, `${tourId}_ub_final`, 'winner', `${tourId}_lb_final`, 'winner');
-
-    return { ...baseState, teamCount: seededTeams.length, includeThirdPlace: false, playoffMatches: bracket };
+    return { ...baseState, includeThirdPlace: false, playoffMatches: createDoubleEliminationBracket(tourId, seededTeams, stageFormats) };
   }
 
   // 3. Swiss System & Swiss + Playoffs
@@ -2425,7 +2465,9 @@ export function createCustomTournament(params: CreateTournamentParams): Tourname
     }
 
     const playoffMatches = mode === 'swiss_playoffs'
-      ? createEmptyPlayoffBracket(includeThirdPlace)
+      ? (stageFormats.playoffType === 'double_elimination'
+        ? createDoubleEliminationBracket(tourId, seededTeams.slice(0, 8), stageFormats).map((match) => ({ ...match, teamAId: undefined, teamBId: undefined, status: 'scheduled' as const }))
+        : createEmptyPlayoffBracket(includeThirdPlace))
       : [];
 
     return {
@@ -2498,10 +2540,10 @@ export function createCustomTournament(params: CreateTournamentParams): Tourname
     const configuredGroupStyle = stageFormats.groupStyle || (mode === 'gsl_groups' ? 'gsl' : 'round_robin');
     const isTop3Gsl = configuredGroupStyle === 'gsl_top3';
     const isGsl = mode === 'gsl_groups' || configuredGroupStyle === 'gsl' || configuredGroupStyle === 'gsl_classic_4' || configuredGroupStyle === 'gsl_double_elim_8' || isTop3Gsl;
-    const includeGroupThirdPlace = includeThirdPlace || (
+    const includeGroupThirdPlace = effectiveIncludeThirdPlace && (includeThirdPlace || (
       groupCount === 2 && teamCount >= 16 &&
       (configuredGroupStyle === 'gsl_double_elim_8' || configuredGroupStyle === 'gsl')
-    );
+    ));
 
     const groups: TournamentGroup[] = [];
     const allGroupMatches: TournamentMatch[] = [];
@@ -2724,6 +2766,11 @@ export function createCustomTournament(params: CreateTournamentParams): Tourname
       playoffMatches = createEmptyPlayoffBracket(includeThirdPlace);
     }
 
+    if (stageFormats.playoffType === 'double_elimination') {
+      const qualifierCount = groups.reduce((sum, group) => sum + ((group.groupStyle === 'gsl_top3' || group.teamIds.length >= 8) ? 3 : 2), 0);
+      playoffMatches = createDoubleEliminationBracket(tourId, seededTeams.slice(0, qualifierCount), stageFormats)
+        .map((match) => ({ ...match, teamAId: undefined, teamBId: undefined, status: 'scheduled' as const }));
+    }
     return {
       ...baseState,
       groupCount,
@@ -2790,6 +2837,14 @@ export function updateGroupMatchResult(
       downstream.status = a && b ? (downstream.status === 'finished' ? 'finished' : 'ready') : 'scheduled';
     }
 
+    if (group.groupStyle === 'round_robin' && group.matches.every((match) => match.status === 'finished')) {
+      const ranked = group.teamIds.map((teamId) => ({ teamId,
+        wins: group.matches.filter((match) => match.winnerId === teamId).length,
+        diff: group.matches.reduce((sum, match) => sum + (match.teamAId === teamId ? match.scoreA - match.scoreB : match.teamBId === teamId ? match.scoreB - match.scoreA : 0), 0)
+      })).sort((a, b) => b.wins - a.wins || b.diff - a.diff || (currentTour.teamSeeds?.[a.teamId] || 0) - (currentTour.teamSeeds?.[b.teamId] || 0));
+      group.qualifiedTeamIds = ranked.slice(0, 2).map((row) => row.teamId);
+      group.eliminatedTeamIds = ranked.slice(2).map((row) => row.teamId);
+    }
     const m1 = group.matches.find((m) => m.poolKey === `gsl_${gLetter}_opening1`);
     const m2 = group.matches.find((m) => m.poolKey === `gsl_${gLetter}_opening2`);
     const winners = group.matches.find((m) => m.poolKey === `gsl_${gLetter}_winners`);
@@ -2836,7 +2891,7 @@ export function updateGroupMatchResult(
         .filter((m) => m.status === 'finished' && /^gsl_[A-Z]_l[12]_|^gsl_[A-Z]_ls$/.test(m.poolKey))
         .map((m) => m.loserId)
         .filter(Boolean) as string[];
-    } else {
+    } else if (group.groupStyle !== 'round_robin') {
       const qualified: string[] = [];
       const eliminated: string[] = [];
 
@@ -2871,9 +2926,21 @@ export function updateGroupMatchResult(
   const groupsList = currentTour.groups || [];
   const allGroupsFinished =
     groupsList.length > 0 &&
-    groupsList.every((g) => g.qualifiedTeamIds && g.qualifiedTeamIds.length >= ((g.groupStyle === 'gsl_top3' || g.teamIds.length >= 8) ? 3 : 2));
+    groupsList.every((g) => g.qualifiedTeamIds && g.qualifiedTeamIds.length >= ((g.groupStyle === 'gsl_top3' || (g.groupStyle !== 'round_robin' && g.teamIds.length >= 8)) ? 3 : 2));
 
   if (allGroupsFinished) {
+    if (currentTour.stageFormats?.playoffType === 'double_elimination') {
+      const qualifiers = groupsList.flatMap((group) => group.qualifiedTeamIds || []);
+      // Seed group winners above runners-up. Four classic groups use A1/B2, C1/D2, B1/A2, D1/C2.
+      const ordered = groupsList.length === 4 && qualifiers.length === 8
+        ? [groupsList[0].qualifiedTeamIds?.[0], groupsList[1].qualifiedTeamIds?.[0], groupsList[3].qualifiedTeamIds?.[0], groupsList[2].qualifiedTeamIds?.[0], groupsList[3].qualifiedTeamIds?.[1], groupsList[2].qualifiedTeamIds?.[1], groupsList[0].qualifiedTeamIds?.[1], groupsList[1].qualifiedTeamIds?.[1]]
+        : groupsList.flatMap((group) => group.qualifiedTeamIds?.slice(0, 1) || []).concat(groupsList.flatMap((group) => group.qualifiedTeamIds?.slice(1) || []));
+      const entrants = ordered.filter(Boolean).map((id) => ({ id } as Team));
+      currentTour.playoffMatches = createDoubleEliminationBracket(currentTour.id, entrants, currentTour.stageFormats);
+      currentTour.includeThirdPlace = false;
+      currentTour.currentStage = 'playoffs';
+      return { updatedTournament: currentTour, isGroupsCompleted: true };
+    }
     // Populate playoff bracket with group qualifiers!
     const groupA = groupsList.find((g) => g.letter === 'A' || g.name.includes('A'));
     const groupB = groupsList.find((g) => g.letter === 'B' || g.name.includes('B'));

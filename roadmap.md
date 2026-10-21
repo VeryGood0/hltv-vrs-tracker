@@ -1,0 +1,4 @@
+- [ ] Add single/double playoff selection after qualifying stages.
+- [ ] Support four classic GSL groups of four, advancing two per group.
+- [ ] Enable manual opening-pair editing for elimination brackets.
+- [ ] Test tournament progression and verify creation/editing in the app.
