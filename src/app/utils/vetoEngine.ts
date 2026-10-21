@@ -416,7 +416,24 @@ export function executeAutoStep(
 
   if (candidates.length === 0) return currentState;
 
-  const bestChoice = candidates[0];
+  // When there is enough map history, follow the evaluated tactical scores
+  // closely. With little/no data, those scores are often identical (50 rating,
+  // 0 matches) and a stable sort always chose the first map in ACTIVE_DUTY_MAPS.
+  // Add confidence-scaled noise so low-information matches produce varied but
+  // still stat-informed bans/picks rather than the same veto every time.
+  const profileA = getTeamProfile(actingTeam);
+  const profileB = getTeamProfile(oppTeam);
+  const averageMapsA = candidates.reduce((sum, candidate) => sum + (profileA.maps[candidate.mapName]?.mapsPlayed || 0), 0) / candidates.length;
+  const averageMapsB = candidates.reduce((sum, candidate) => sum + (profileB.maps[candidate.mapName]?.mapsPlayed || 0), 0) / candidates.length;
+  const confidence = Math.min(1, Math.min(averageMapsA, averageMapsB) / 12);
+  const noiseAmplitude = 1.5 + (1 - confidence) * 22;
+  const bestChoice = [...candidates]
+    .map((candidate) => ({
+      candidate,
+      adjustedScore: candidate.score + (Math.random() * 2 - 1) * noiseAmplitude
+    }))
+    .sort((a, b) => b.adjustedScore - a.adjustedScore)[0].candidate;
+
   return applyVetoSelection(
     currentState,
     bestChoice.mapName,

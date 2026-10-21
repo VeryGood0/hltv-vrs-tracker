@@ -20,6 +20,9 @@ interface SwissPairsModalProps {
   matches: TournamentMatch[];
   teams: Team[];
   onSaveMatches: (matches: TournamentMatch[]) => void;
+  allowCrossPool?: boolean;
+  title?: string;
+  description?: string;
 }
 
 export const SwissPairsModal: React.FC<SwissPairsModalProps> = ({
@@ -27,7 +30,10 @@ export const SwissPairsModal: React.FC<SwissPairsModalProps> = ({
   onClose,
   matches,
   teams,
-  onSaveMatches
+  onSaveMatches,
+  allowCrossPool = false,
+  title = 'Настройка пар текущего раунда (Швейцарская система)',
+  description = 'Составляйте свои пары матчей или верните стандартный посев по рейтингу VRS'
 }) => {
   const [currentMatches, setCurrentMatches] = useState<TournamentMatch[]>(matches);
   const [pickingSlot, setPickingSlot] = useState<{ matchId: string; slot: 'A' | 'B' } | null>(null);
@@ -40,19 +46,42 @@ export const SwissPairsModal: React.FC<SwissPairsModalProps> = ({
   if (!isOpen) return null;
 
   const getTeam = (id?: string) => teams.find((t) => t.id === id);
-  // Only teams from this round's matches, and only those in the same score pool, can be swapped.
+  // Swiss pairings stay inside a score pool; playoff opening pairings share
+  // one pool across all matches in the starting round.
   const teamsForMatch = (match: TournamentMatch) => {
     const ids = currentMatches
-      .filter((m) => m.poolKey === match.poolKey)
+      .filter((m) => allowCrossPool || m.poolKey === match.poolKey)
       .flatMap((m) => [m.teamAId, m.teamBId])
       .filter(Boolean) as string[];
-    return ids.map((id) => getTeam(id)).filter(Boolean) as Team[];
+    return [...new Set(ids)].map((id) => getTeam(id)).filter(Boolean) as Team[];
   };
-  const pools = [...new Set(currentMatches.map((m) => m.poolKey))];
+  const pools = allowCrossPool ? ['__all__'] : [...new Set(currentMatches.map((m) => m.poolKey))];
 
   const handleSwapSlot = (matchId: string, slot: 'A' | 'B', newTeamId: string) => {
     soundFx.playClick();
-    setCurrentMatches(swapSwissRoundMatches(currentMatches, matchId, slot, newTeamId));
+    const targetMatch = currentMatches.find((match) => match.id === matchId);
+    if (!targetMatch) return;
+    const teamOnOtherSide = slot === 'A' ? targetMatch.teamBId : targetMatch.teamAId;
+    if (teamOnOtherSide === newTeamId) {
+      setCurrentMatches(currentMatches.map((match) => match.id === matchId
+        ? { ...match, teamAId: match.teamBId, teamBId: match.teamAId }
+        : match));
+      setPickingSlot(null);
+      return;
+    }
+    if (!allowCrossPool) {
+      setCurrentMatches(swapSwissRoundMatches(currentMatches, matchId, slot, newTeamId));
+    } else {
+      const target = currentMatches.find((match) => match.id === matchId);
+      if (!target) return;
+      const displacedId = slot === 'A' ? target.teamAId : target.teamBId;
+      const existingMatch = currentMatches.find((match) => match.id !== matchId && (match.teamAId === newTeamId || match.teamBId === newTeamId));
+      setCurrentMatches(currentMatches.map((match) => {
+        if (match.id === matchId) return { ...match, teamAId: slot === 'A' ? newTeamId : match.teamAId, teamBId: slot === 'B' ? newTeamId : match.teamBId };
+        if (existingMatch && match.id === existingMatch.id) return { ...match, teamAId: match.teamAId === newTeamId ? displacedId : match.teamAId, teamBId: match.teamBId === newTeamId ? displacedId : match.teamBId };
+        return match;
+      }));
+    }
     setPickingSlot(null);
   };
 
@@ -64,7 +93,7 @@ export const SwissPairsModal: React.FC<SwissPairsModalProps> = ({
   const rearrange = (order: (list: Team[]) => Team[], pairIndex: (i: number, n: number) => [number, number]) => {
     let next = [...currentMatches];
     for (const pool of pools) {
-      const poolMatches = next.filter((m) => m.poolKey === pool);
+      const poolMatches = allowCrossPool ? [...next] : next.filter((m) => m.poolKey === pool);
       const list = order(poolMatches.flatMap((m) => [m.teamAId, m.teamBId]).map((id) => getTeam(id)).filter(Boolean) as Team[]);
       poolMatches.forEach((pm, i) => {
         const [a, b] = pairIndex(i, list.length);
@@ -81,7 +110,14 @@ export const SwissPairsModal: React.FC<SwissPairsModalProps> = ({
 
   const handleRandomize = () => {
     soundFx.playClick();
-    rearrange((l) => [...l].sort(() => Math.random() - 0.5), (i) => [i * 2, i * 2 + 1]);
+    rearrange((list) => {
+      const shuffled = [...list];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      return shuffled;
+    }, (i) => [i * 2, i * 2 + 1]);
   };
 
   const handleSaveAndClose = () => {
@@ -101,10 +137,10 @@ export const SwissPairsModal: React.FC<SwissPairsModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold text-white tracking-wide">
-                Настройка пар текущего раунда (Швейцарская система)
+                {title}
               </h3>
               <p className="text-xs font-mono text-slate-400">
-                Составляйте свои пары матчей или верните стандартный посев по рейтингу VRS
+                {description}
               </p>
             </div>
           </div>
@@ -141,7 +177,7 @@ export const SwissPairsModal: React.FC<SwissPairsModalProps> = ({
           </div>
 
           <span className="text-[11px] font-mono text-slate-500">
-            {currentMatches.length} матчей · замена только внутри одного счёта
+            {currentMatches.length} матчей · {allowCrossPool ? 'перестановка команд в стартовом раунде' : 'замена только внутри одного счёта'}
           </span>
         </div>
 

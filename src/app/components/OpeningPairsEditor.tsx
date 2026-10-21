@@ -1,4 +1,5 @@
 import type { TournamentState, Team } from '../types';
+import { Shuffle } from 'lucide-react';
 import { getOpeningScopes, getOpeningSlots, type OpeningPairOrders } from '../utils/openingPairs';
 
 export function OpeningPairsEditor({ tournament, teams, orders, onChange }: {
@@ -11,8 +12,21 @@ export function OpeningPairsEditor({ tournament, teams, orders, onChange }: {
       const initial = slots.map((slot) => slot.teamId);
       const saved = orders[scope.key];
       const order = saved && saved.length === initial.length && saved.every((id) => initial.includes(id)) ? saved : initial;
+      const randomizePairs = () => {
+        const shuffled = [...order];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        onChange({ ...orders, [scope.key]: shuffled });
+      };
       return <section key={scope.key} className="space-y-2">
-        <h5 className="text-sm font-semibold text-foreground">{scope.name}</h5>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h5 className="text-sm font-semibold text-foreground">{scope.name}</h5>
+          <button type="button" onClick={randomizePairs} className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-accent">
+            <Shuffle className="h-3.5 w-3.5" /> Случайные пары
+          </button>
+        </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {[...new Set(slots.map((slot) => slot.match.id))].map((matchId) => {
             const match = slots.find((slot) => slot.match.id === matchId)?.match;

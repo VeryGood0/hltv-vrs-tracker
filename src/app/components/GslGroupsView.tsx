@@ -269,6 +269,16 @@ export const GslGroupsView: React.FC<GslGroupsViewProps> = ({
           const upperFinal = getGslMatch('uf');
           const lowerFinal = getGslMatch('ls');
           const requiredPlaces = requiredQualifiers(group);
+          const directlySeededMatches = group.matches.filter((match) =>
+            !!match.teamAId && !!match.teamBId && !match.sourceA && !match.sourceB &&
+            match.poolKey !== 'third_place' && !match.poolKey.startsWith('lb_')
+          );
+          const firstDirectRound = directlySeededMatches.length
+            ? Math.min(...directlySeededMatches.map((match) => match.roundNumber))
+            : -1;
+          const openingPairMatches = directlySeededMatches.filter((match) => match.roundNumber === firstDirectRound);
+          const canEditOpeningPairs = openingPairMatches.length > 0 && openingPairMatches.every((match) => match.status !== 'finished') &&
+            (group.groupStyle !== 'round_robin' || group.matches.every((match) => match.status !== 'finished'));
 
           return (
             <div
@@ -287,7 +297,7 @@ export const GslGroupsView: React.FC<GslGroupsViewProps> = ({
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {onUpdateGroupMatches && group.matches.some((match) => match.poolKey.startsWith('gsl_')) && (group.teamIds.length < 8 ? m1?.status !== 'finished' && m2?.status !== 'finished' : upperOpening.every((m) => m.status !== 'finished')) && (
+                  {onUpdateGroupMatches && canEditOpeningPairs && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();

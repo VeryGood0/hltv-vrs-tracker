@@ -38,6 +38,7 @@ import {
   isGrandFinalMatch
 } from '../utils/tournament';
 import { executeCompleteAutoVeto } from '../utils/vetoEngine';
+import { getInitialPlayoffMatches } from '../utils/openingPairs';
 import { simulateSeriesOnVeto } from '../utils/mapSimulation';
 import { soundFx } from '../utils/audio';
 import {
@@ -257,6 +258,7 @@ export const TournamentHub: React.FC<TournamentHubProps> = ({
   const [activeMatchToSimulate, setActiveMatchToSimulate] = useState<TournamentMatch | null>(null);
   const [isResultsOpen, setIsResultsOpen] = useState(false);
   const [isPairsEditorOpen, setIsPairsEditorOpen] = useState(false);
+  const [isPlayoffPairsEditorOpen, setIsPlayoffPairsEditorOpen] = useState(false);
   const [isCreateTournamentOpen, setIsCreateTournamentOpen] = useState(false);
 
   // Manual team slot picker state
@@ -2184,6 +2186,13 @@ export const TournamentHub: React.FC<TournamentHubProps> = ({
     ? qualifiedSwissTeams
     : teams;
 
+  const openingPlayoffMatches = getInitialPlayoffMatches(
+    tournament.mode === 'round_robin' ? (tournament.roundRobinMatches || []) : (tournament.playoffMatches || [])
+  );
+  const canEditOpeningPlayoffPairs = tournament.currentStage !== 'completed' && openingPlayoffMatches.length > 0 && openingPlayoffMatches.every((match) =>
+    match.status !== 'finished' && !!match.teamAId && !!match.teamBId && !match.winnerId && !match.loserId
+  ) && (tournament.mode !== 'round_robin' || (tournament.roundRobinMatches || []).every((match) => match.status !== 'finished'));
+
   const isCompleted = tournament.currentStage === 'completed';
 
   return (
@@ -2555,10 +2564,10 @@ export const TournamentHub: React.FC<TournamentHubProps> = ({
             nextStageName={nextStageName}
             onOpenMatch={isCurrentStage ? (match) => setActiveMatchToSimulate(match) : () => {}}
             onQuickSimulateMatch={isCurrentStage ? handleQuickSimulateMatch : undefined}
-            onSelectManualSlot={isCurrentStage ? (matchId, slot) => setManualSlotPicker({ matchId, slot }) : undefined}
-            onSwapMatchTeams={isCurrentStage ? handleSwapMatchTeams : undefined}
-            onResetDefaultPairs={isCurrentStage && (tournament.mode !== 'major' || tournament.swissRound === 1) ? handleResetDefaultPairs : undefined}
-            onOpenPairsEditor={isCurrentStage && (tournament.mode !== 'major' || tournament.swissRound === 1) ? () => setIsPairsEditorOpen(true) : undefined}
+            onSelectManualSlot={isCurrentStage && tournament.swissRound === 1 ? (matchId, slot) => setManualSlotPicker({ matchId, slot }) : undefined}
+            onSwapMatchTeams={isCurrentStage && tournament.swissRound === 1 ? handleSwapMatchTeams : undefined}
+            onResetDefaultPairs={isCurrentStage && tournament.swissRound === 1 ? handleResetDefaultPairs : undefined}
+            onOpenPairsEditor={isCurrentStage && tournament.swissRound === 1 ? () => setIsPairsEditorOpen(true) : undefined}
             onAdvanceToPlayoffs={isCurrentStage && stageNumber === 3 ? () => setActiveStageTab('playoffs') : undefined}
             onToggleMatchFormat={isCurrentStage ? handleToggleMatchFormat : undefined}
           />
@@ -2571,10 +2580,10 @@ export const TournamentHub: React.FC<TournamentHubProps> = ({
           currentRound={tournament.swissRound}
           onOpenMatch={(m) => setActiveMatchToSimulate(m)}
           onQuickSimulateMatch={handleQuickSimulateMatch}
-          onSelectManualSlot={(matchId, slot) => setManualSlotPicker({ matchId, slot })}
-          onSwapMatchTeams={handleSwapMatchTeams}
-          onResetDefaultPairs={handleResetDefaultPairs}
-          onOpenPairsEditor={() => setIsPairsEditorOpen(true)}
+          onSelectManualSlot={tournament.swissRound === 1 ? (matchId, slot) => setManualSlotPicker({ matchId, slot }) : undefined}
+          onSwapMatchTeams={tournament.swissRound === 1 ? handleSwapMatchTeams : undefined}
+          onResetDefaultPairs={tournament.swissRound === 1 ? handleResetDefaultPairs : undefined}
+          onOpenPairsEditor={tournament.swissRound === 1 ? () => setIsPairsEditorOpen(true) : undefined}
           onAdvanceToPlayoffs={tournament.mode === 'swiss_playoffs' ? () => setActiveStageTab('playoffs') : undefined}
           onToggleMatchFormat={handleToggleMatchFormat}
         />
@@ -2587,7 +2596,7 @@ export const TournamentHub: React.FC<TournamentHubProps> = ({
           onAdvanceToPlayoffs={() => setActiveStageTab('playoffs')}
           onToggleMatchFormat={handleToggleMatchFormat}
           onUpdateGroupMatches={handleUpdateGroupMatches}
-          onSelectManualSlot={(matchId, slot) => setManualSlotPicker({ matchId, slot })}
+          onSelectManualSlot={undefined}
         />
       ) : tournament.mode === 'blast_bounty' ? (
         <BlastBountyStageView
@@ -2616,7 +2625,7 @@ export const TournamentHub: React.FC<TournamentHubProps> = ({
           hideThirdPlaceToggle={tournament.mode === 'major' || tournament.mode === 'double_elimination' || tournament.stageFormats?.playoffType === 'double_elimination' || tournament.mode === 'round_robin'}
           onOpenMatch={(m) => setActiveMatchToSimulate(m)}
           onQuickSimulateMatch={handleQuickSimulateMatch}
-          onSelectManualSlot={(matchId, slot) => setManualSlotPicker({ matchId, slot })}
+          onOpenStartingPairs={canEditOpeningPlayoffPairs ? () => setIsPlayoffPairsEditorOpen(true) : undefined}
           onResetToSwissSeeding={tournament.mode === 'major' || tournament.mode === 'round_robin' ? undefined : handleResetToSwissSeeding}
           onRandomizePlayoffTeams={tournament.mode === 'major' ? undefined : handleRandomizePlayoffTeams}
           onSeedTop8VRS={tournament.mode === 'major' ? undefined : handleSeedTop8VRS}
@@ -2695,6 +2704,68 @@ export const TournamentHub: React.FC<TournamentHubProps> = ({
             ...tournament,
             swissMatches: apply(tournament.swissMatches),
             ...(tournament.majorStages ? { majorStages: tournament.majorStages.map((st) => ({ ...st, matches: apply(st.matches) })) } : {})
+          });
+        }}
+      />
+      <SwissPairsModal
+        isOpen={isPlayoffPairsEditorOpen}
+        onClose={() => setIsPlayoffPairsEditorOpen(false)}
+        matches={openingPlayoffMatches}
+        teams={teams}
+        allowCrossPool
+        title={tournament.mode === 'round_robin' ? 'Настройка пар первого тура' : 'Настройка стартовых пар плей-офф'}
+        description={tournament.mode === 'round_robin'
+          ? 'Меняются пары первого тура; остальное расписание сохраняется с тем же составом участников.'
+          : 'Переставляйте команды только в первом раунде. Победители и проигравшие дальше автоматически попадут в нужные матчи сетки.'}
+        onSaveMatches={(edited) => {
+          const byId = new Map(edited.map((match) => [match.id, match]));
+          if (tournament.mode === 'round_robin') {
+            const remapping = new Map<string, string>();
+            openingPlayoffMatches.forEach((original) => {
+              const replacement = byId.get(original.id);
+              if (!replacement) return;
+              if (original.teamAId && replacement.teamAId) remapping.set(original.teamAId, replacement.teamAId);
+              if (original.teamBId && replacement.teamBId) remapping.set(original.teamBId, replacement.teamBId);
+            });
+            onUpdateTournament({
+              ...tournament,
+              roundRobinMatches: (tournament.roundRobinMatches || []).map((match) => ({
+                ...match,
+                teamAId: match.teamAId ? remapping.get(match.teamAId) || match.teamAId : undefined,
+                teamBId: match.teamBId ? remapping.get(match.teamBId) || match.teamBId : undefined,
+                scoreA: 0,
+                scoreB: 0,
+                winnerId: undefined,
+                loserId: undefined,
+                mapsPlayed: undefined,
+                vetoState: undefined,
+                status: 'ready' as const
+              }))
+            });
+            return;
+          }
+          onUpdateTournament({
+            ...tournament,
+            playoffMatches: tournament.playoffMatches.map((match) => {
+              const editedMatch = byId.get(match.id);
+              if (!editedMatch) return match;
+              return {
+                ...match,
+                teamAId: editedMatch.teamAId,
+                teamBId: editedMatch.teamBId,
+                scoreA: 0,
+                scoreB: 0,
+                winnerId: undefined,
+                loserId: undefined,
+                mapsPlayed: undefined,
+                vetoState: undefined,
+                deltaPointsA: undefined,
+                deltaPointsB: undefined,
+                deltaFormA: undefined,
+                deltaFormB: undefined,
+                status: 'ready' as const
+              };
+            })
           });
         }}
       />

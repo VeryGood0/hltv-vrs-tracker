@@ -2775,24 +2775,36 @@ export function createCustomTournament(params: CreateTournamentParams): Tourname
           gMatches.push(m1, m2, winners, elim, decider);
         }
       } else {
-        // Standard Round Robin inside group
-        for (let i = 0; i < groupTeams.length; i++) {
-          for (let j = i + 1; j < groupTeams.length; j++) {
+        // Standard round robin inside the group. Keep the full everyone-vs-
+        // everyone schedule, but assign real round numbers so users can edit
+        // only the opening set of non-overlapping pairings.
+        const rotation = groupTeams.map((_, index) => index);
+        if (rotation.length % 2 === 1) rotation.push(-1); // bye for odd fields
+        const roundCount = Math.max(0, rotation.length - 1);
+        for (let roundIndex = 0; roundIndex < roundCount; roundIndex++) {
+          for (let pairIndex = 0; pairIndex < rotation.length / 2; pairIndex++) {
+            const indexA = rotation[pairIndex];
+            const indexB = rotation[rotation.length - 1 - pairIndex];
+            if (indexA < 0 || indexB < 0) continue;
+            const low = Math.min(indexA, indexB);
+            const high = Math.max(indexA, indexB);
             gMatches.push({
-              id: `${tourId}_grp_${gLetter}_${i}_${j}`,
+              id: `${tourId}_grp_${gLetter}_${low}_${high}`,
               stage: 'groups',
               poolKey: `grp_${gLetter}`,
-              roundNumber: 1,
+              roundNumber: roundIndex + 1,
               groupLetter: gLetter,
-              name: `${gName} · ${groupTeams[i].name} vs ${groupTeams[j].name}`,
-              teamAId: groupTeams[i].id,
-              teamBId: groupTeams[j].id,
+              name: `${gName} · ${groupTeams[indexA].name} vs ${groupTeams[indexB].name}`,
+              teamAId: groupTeams[indexA].id,
+              teamBId: groupTeams[indexB].id,
               scoreA: 0,
               scoreB: 0,
               format: stageFormats.groupFormat || 'BO1',
               status: 'ready'
             });
           }
+          const lastTeam = rotation.pop()!;
+          rotation.splice(1, 0, lastTeam);
         }
       }
 

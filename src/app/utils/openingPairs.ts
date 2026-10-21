@@ -10,8 +10,9 @@ export function getOpeningScopes(tournament: TournamentState) {
 }
 
 export function getOpeningSlots(matches: TournamentMatch[], roundRobin = false) {
+  if (!matches.length) return [];
   const firstRound = Math.min(...matches.map((match) => match.roundNumber));
-  return matches.filter((match) => match.status !== 'finished' && (!roundRobin || match.roundNumber === firstRound))
+  return matches.filter((match) => match.status !== 'finished' && match.roundNumber === firstRound)
     .flatMap((match) => (['A', 'B'] as const).flatMap((side) => {
       const teamId = side === 'A' ? match.teamAId : match.teamBId;
       const source = side === 'A' ? match.sourceA : match.sourceB;
@@ -39,4 +40,24 @@ export function applyOpeningPairOrders(tournament: TournamentState, orders: Open
     ...(tournament.roundRobinMatches ? { roundRobinMatches: apply(tournament.roundRobinMatches) } : {}),
     ...(tournament.groups ? { groups: tournament.groups.map((group) => ({ ...group, matches: apply(group.matches) })), groupMatches: apply(tournament.groupMatches || []) } : {}),
     ...(tournament.majorStages ? { majorStages: tournament.majorStages.map((stage) => ({ ...stage, matches: apply(stage.matches) })) } : {}) };
+}
+
+/**
+ * Returns only directly seeded matches in the first playable playoff round.
+ * Bracket matches fed by winners/losers, lower-bracket matches and finals are
+ * deliberately excluded: their participants must be derived automatically.
+ */
+export function getInitialPlayoffMatches(matches: TournamentMatch[]): TournamentMatch[] {
+  const directOpeningMatches = matches.filter((match) => {
+    const key = (match.poolKey || '').toLowerCase();
+    if (key === 'third_place' || key === 'final_reset' || key === 'final') return false;
+    if (key.startsWith('lb_') || key.startsWith('lower_')) return false;
+    if (match.sourceA || match.sourceB) return false;
+    return !!match.teamAId && !!match.teamBId;
+  });
+  if (!directOpeningMatches.length) return [];
+  const firstRoundNumber = Math.min(...directOpeningMatches.map((match) => match.roundNumber));
+  return directOpeningMatches
+    .filter((match) => match.roundNumber === firstRoundNumber)
+    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
 }

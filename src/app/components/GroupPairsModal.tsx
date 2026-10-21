@@ -20,14 +20,16 @@ const getOpeningMatches = (group: TournamentGroup): TournamentMatch[] => {
     .sort((a, b) => Number(a.poolKey.split('_').at(-1)) - Number(b.poolKey.split('_').at(-1)));
   if (eightTeamGsl.length) return eightTeamGsl;
 
-  const firstTwo = [
-    group.matches.find((m) => m.poolKey === `gsl_${letter}_opening1` || m.id.endsWith('_m1') || m.poolKey.includes('opening1')),
-    group.matches.find((m) => m.poolKey === `gsl_${letter}_opening2` || m.id.endsWith('_m2') || m.poolKey.includes('opening2'))
+  const gslOpening = [
+    group.matches.find((m) => m.poolKey === `gsl_${letter}_opening1` || m.poolKey.includes('opening1')),
+    group.matches.find((m) => m.poolKey === `gsl_${letter}_opening2` || m.poolKey.includes('opening2'))
   ].filter(Boolean) as TournamentMatch[];
-  if (firstTwo.length) return firstTwo;
+  if (gslOpening.length) return gslOpening;
 
-  // For non-GSL group stages, edit the first two scheduled matches only.
-  return group.matches.filter((m) => m.roundNumber === 1).slice(0, 4);
+  // For non-GSL group stages, show every directly scheduled fixture from the
+  // first round (not just match 1 and 2 in an 8-team round robin).
+  const firstRound = group.matches.filter((match) => match.roundNumber === Math.min(...group.matches.map((item) => item.roundNumber)));
+  return firstRound.slice(0, 16);
 };
 
 export const GroupPairsModal: React.FC<GroupPairsModalProps> = ({
@@ -83,7 +85,11 @@ export const GroupPairsModal: React.FC<GroupPairsModalProps> = ({
 
   const randomize = () => {
     soundFx.playClick();
-    const shuffled = [...groupTeams].sort(() => Math.random() - 0.5);
+    const shuffled = [...groupTeams];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
     const next: Record<string, string> = {};
     openingMatches.forEach((_, index) => {
       next[`${index}A`] = shuffled[index * 2]?.id || '';
@@ -96,14 +102,34 @@ export const GroupPairsModal: React.FC<GroupPairsModalProps> = ({
     if (openingMatches.length === 0) return;
     soundFx.playVictory();
     const byId = new Map<string, number>(openingMatches.map((match, index): [string, number] => [match.id, index]));
+    const slotTeamIds = openingMatches.flatMap((match, index) => [
+      match.teamAId || groupTeams[index * 2]?.id || '',
+      match.teamBId || groupTeams[index * 2 + 1]?.id || ''
+    ]).filter(Boolean);
+    const selectedSlotTeamIds = openingMatches.flatMap((_, index) => [assignments[`${index}A`], assignments[`${index}B`]]).filter(Boolean);
+    const slotMapping = new Map(slotTeamIds.map((teamId, index) => [teamId, selectedSlotTeamIds[index]]));
     const updated = group.matches.map((match) => {
       const index = byId.get(match.id);
-      if (index === undefined) return match;
+      if (index === undefined && group.groupStyle !== 'round_robin') return match;
       const {
         winnerId, loserId, mapsPlayed, vetoState,
         deltaPointsA, deltaPointsB, deltaFormA, deltaFormB,
         ...matchWithoutPriorResult
       } = match;
+      if (group.groupStyle === 'round_robin') {
+        return {
+          ...matchWithoutPriorResult,
+          teamAId: match.teamAId ? slotMapping.get(match.teamAId) || match.teamAId : undefined,
+          teamBId: match.teamBId ? slotMapping.get(match.teamBId) || match.teamBId : undefined,
+          scoreA: 0,
+          scoreB: 0,
+          winnerId: undefined,
+          loserId: undefined,
+          mapsPlayed: undefined,
+          vetoState: undefined,
+          status: 'ready' as const
+        };
+      }
       return {
         ...matchWithoutPriorResult,
         teamAId: assignments[`${index}A`] || groupTeams[index * 2]?.id || '',

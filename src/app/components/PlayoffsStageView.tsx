@@ -30,6 +30,7 @@ interface PlayoffsStageViewProps {
   onOpenMatch: (match: TournamentMatch) => void;
   onQuickSimulateMatch?: (match: TournamentMatch) => void;
   onSelectManualSlot?: (matchId: string, slot: 'A' | 'B') => void;
+  onOpenStartingPairs?: () => void;
   onResetToSwissSeeding?: () => void;
   onRandomizePlayoffTeams?: () => void;
   onSeedTop8VRS?: () => void;
@@ -51,6 +52,7 @@ export const PlayoffsStageView: React.FC<PlayoffsStageViewProps> = ({
   onOpenMatch,
   onQuickSimulateMatch,
   onSelectManualSlot,
+  onOpenStartingPairs,
   onResetToSwissSeeding,
   onRandomizePlayoffTeams,
   onSeedTop8VRS,
@@ -349,6 +351,21 @@ export const PlayoffsStageView: React.FC<PlayoffsStageViewProps> = ({
 
         {/* Action Controls */}
         <div className="flex flex-wrap items-center gap-2 self-stretch md:self-auto">
+          {onOpenStartingPairs && (
+            <button
+              type="button"
+              onClick={() => {
+                soundFx.playClick();
+                onOpenStartingPairs();
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 text-xs font-mono border border-amber-500/30 transition-colors cursor-pointer"
+              title="Настроить пары только для стартового раунда плей-офф"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              <span>Стартовые пары</span>
+            </button>
+          )}
+
           {/* Link to Swiss Toggle (Only if from Swiss tournament) */}
           {isFromSwiss && onToggleLinkSwiss && (
             <button
