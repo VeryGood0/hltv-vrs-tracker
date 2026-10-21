@@ -2486,7 +2486,7 @@ export function createCustomTournament(params: CreateTournamentParams): Tourname
       ...baseState,
       roundRobinTable,
       roundRobinMatches: matches,
-      playoffMatches: matches // reuse playoffMatches so standard handlers can locate them
+      playoffMatches: []
     };
   }
 
